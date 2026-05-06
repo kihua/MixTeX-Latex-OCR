@@ -49,6 +49,13 @@ a = Analysis(
         'transformers.training_args',
     ],
     hiddenimports=[
+        # matplotlib 及其 Agg 后端（用于公式渲染预览）
+        'matplotlib',
+        'matplotlib.backends.backend_agg',
+        'matplotlib.figure',
+        'matplotlib.text',
+        'matplotlib.font_manager',
+
         # transformers 基础模块
         'transformers',
         'transformers.models',

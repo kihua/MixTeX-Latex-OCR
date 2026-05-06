@@ -16,30 +16,47 @@ import os
 import csv
 import re
 import ctypes
+import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+plt.rcParams['mathtext.fontset'] = 'cm'  # 公式预览使用 Computer Modern 字体
 
 if hasattr(sys, '_MEIPASS'):
     base_path = sys._MEIPASS
+    settings_dir = os.path.dirname(sys.executable)
 else:
     base_path = os.path.abspath(".")
+    settings_dir = os.path.abspath(".")
+FONT_SETTINGS_FILE = os.path.join(settings_dir, 'font_settings.json')
 
 class MixTeXApp:
     def __init__(self, root):
         self.root = root
         
-        # 添加 DPI 感知支持 (解决高分屏模糊问题)
+        # 添加 DPI 感知支持 — 使用 tkinter 自身 API，PY 和 EXE 下行为一致
         try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 启用 DPI 感知
-            self.dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except:
+            pass
+        try:
+            # winfo_fpixels('1i') 返回每英寸像素数，比 GetScaleFactorForDevice 更可靠
+            pixels_per_inch = self.root.winfo_fpixels('1i')
+            self.dpi_scale = pixels_per_inch / 96.0
             self.root.tk.call('tk', 'scaling', self.dpi_scale)
         except Exception as e:
-            print(f"DPI 设置失败: {e}")
+            print(f"DPI 缩放获取失败: {e}")
             self.dpi_scale = 1.0
         
+        # 加载字体设置（必须在创建控件之前）
+        self.load_font_settings()
+
         self.root.title('MixTeX')
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
         self.root.overrideredirect(True)
         self.root.wm_attributes('-topmost', 1)
         self.root.attributes('-alpha', 0.85)
+        self.root.minsize(self.scale_size(400), self.scale_size(300))
         self.TRANSCOLOUR = '#a9abc6'
         self.is_only_parse_when_show = False
         self.icon = self.load_scaled_image(os.path.join(base_path, "icon.png"))
@@ -49,20 +66,42 @@ class MixTeXApp:
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
         self.icon_label = tk.Label(self.main_frame, image=self.icon_tk, bg=self.TRANSCOLOUR)
-        self.icon_label.pack(pady=self.scale_size(10))
+        self.icon_label.pack(pady=self.scale_size(5))
 
-        self.text_frame = tk.Frame(self.main_frame, bg='white', bd=1, relief=tk.SOLID)
-        self.text_frame.pack(padx=self.scale_size(5), pady=self.scale_size(5), fill=tk.BOTH, expand=True)
+        # 使用 PanedWindow 实现可拖拽分隔的文本区和预览区
+        self.pane = tk.PanedWindow(self.main_frame, orient=tk.VERTICAL, bg='white',
+                                   sashwidth=4, sashrelief=tk.RAISED)
+        self.pane.pack(padx=self.scale_size(5), pady=self.scale_size(5), fill=tk.BOTH, expand=True)
 
-        # 使用缩放后的字体大小
-        font_size = self.scale_size(9)
-        self.text_box = tk.Text(self.text_frame, wrap=tk.WORD, bg='white', fg='black', 
-                               height=6, width=30, font=('Arial', font_size))
+        self.text_frame = tk.Frame(self.pane, bg='white', bd=1, relief=tk.SOLID)
+        self.pane.add(self.text_frame, stretch='always')
+
+        # 使用可配置的编辑器字体大小（含DPI缩放）
+        font_size = self.scale_size(self.editor_font_size)
+        self.text_box = tk.Text(self.text_frame, wrap=tk.WORD, bg='white', fg='black',
+                               height=12, width=40, font=('Arial', font_size))
         self.text_box.pack(padx=self.scale_size(2), pady=self.scale_size(2), fill=tk.BOTH, expand=True)
 
+        # 公式预览区域（初始隐藏，有结果时显示）
+        self.preview_frame = tk.Frame(self.pane, bg='white', bd=1, relief=tk.SOLID)
+        self.preview_label = tk.Label(self.preview_frame, bg='white')
+        self.preview_label.pack(padx=self.scale_size(5), pady=self.scale_size(5))
+
+        # 窗口拖拽（通过图标区域）
         self.icon_label.bind('<ButtonPress-1>', self.start_move)
         self.icon_label.bind('<B1-Motion>', self.do_move)
         self.icon_label.bind('<ButtonPress-3>', self.show_menu)
+
+        # 编辑 LaTeX 后重新渲染预览（带防抖）
+        self._edit_timer = None
+        self.text_box.bind('<KeyRelease>', self._on_text_edit)
+
+        # 窗口边缘缩放
+        self.root.bind('<Motion>', self._on_mouse_move)
+        self.root.bind('<ButtonPress-1>', self._on_button_press, add='+')
+        self.root.bind('<B1-Motion>', self._on_drag, add='+')
+        self.root.bind('<ButtonRelease-1>', self._on_release, add='+')
+        self.root.bind('<Configure>', self._on_window_configure, add='+')
         self.data_folder = "data"
         self.metadata_file = os.path.join(self.data_folder, "metadata.csv")
         self.use_dollars_for_inline_math = False
@@ -71,6 +110,9 @@ class MixTeXApp:
         self.annotation_window = None
         self.current_image = None
         self.output = None
+        self._last_rendered = None
+        self._full_preview_image = None
+        self._resize_data = None  # 边缘缩放状态
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder)
 
@@ -84,6 +126,7 @@ class MixTeXApp:
         settings_menu = tk.Menu(self.menu, tearoff=0)
         settings_menu.add_checkbutton(label="$ 公式 $", onvalue=1, offvalue=0, command=self.toggle_latex_replacement, variable=tk.BooleanVar(value=self.use_dollars_for_inline_math))
         settings_menu.add_checkbutton(label="$$ 单行公式 $$", onvalue=1, offvalue=0, command=self.toggle_convert_align_to_equations, variable=tk.BooleanVar(value=self.convert_align_to_equations_enabled))
+        settings_menu.add_command(label="字体设置", command=self.show_font_settings)
         self.menu.add_cascade(label="设置", menu=settings_menu)
         self.menu.add_command(label="反馈标注", command=self.show_feedback_options)
         self.menu.add_command(label="最小化", command=self.minimize)
@@ -113,7 +156,92 @@ class MixTeXApp:
     def scale_size(self, size):
         """根据DPI缩放尺寸"""
         return int(size * self.dpi_scale)
-    
+
+    # ── 字体设置持久化 ─────────────────────────────────────
+    def load_font_settings(self):
+        """从文件加载字体设置"""
+        try:
+            if os.path.exists(FONT_SETTINGS_FILE):
+                with open(FONT_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                self.editor_font_size = settings.get('editor_font_size', 16)
+                self.preview_font_size = settings.get('preview_font_size', 28)
+            else:
+                self.editor_font_size = 16
+                self.preview_font_size = 28
+        except Exception:
+            self.editor_font_size = 16
+            self.preview_font_size = 28
+
+    def save_font_settings(self):
+        """保存字体设置到文件"""
+        try:
+            settings = {
+                'editor_font_size': self.editor_font_size,
+                'preview_font_size': self.preview_font_size,
+            }
+            with open(FONT_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存字体设置失败: {e}")
+
+    def show_font_settings(self):
+        """显示字体设置对话框"""
+        win = tk.Toplevel(self.root)
+        win.title("字体设置")
+        win.overrideredirect(True)
+        win.wm_attributes('-topmost', 1)
+        win.configure(bg='white')
+
+        # 居中于主窗口
+        mx = self.root.winfo_x()
+        my = self.root.winfo_y()
+        mw = self.root.winfo_width()
+        mh = self.root.winfo_height()
+        dw, dh = 280, 200
+        win.geometry(f"{dw}x{dh}+{mx + (mw - dw)//2}+{my + (mh - dh)//2}")
+
+        frame = tk.Frame(win, bg='white', padx=20, pady=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # 编辑器字体大小
+        tk.Label(frame, text="编辑器字体大小:", bg='white',
+                font=('Arial', 11)).pack(anchor='w')
+        editor_var = tk.IntVar(value=self.editor_font_size)
+        tk.Spinbox(frame, from_=8, to=48, textvariable=editor_var,
+                  width=8, font=('Arial', 11)).pack(anchor='w', pady=(0, 10))
+
+        # 预览字体大小
+        tk.Label(frame, text="预览字体大小:", bg='white',
+                font=('Arial', 11)).pack(anchor='w')
+        preview_var = tk.IntVar(value=self.preview_font_size)
+        tk.Spinbox(frame, from_=12, to=72, textvariable=preview_var,
+                  width=8, font=('Arial', 11)).pack(anchor='w', pady=(0, 15))
+
+        # 按钮区域
+        btn_frame = tk.Frame(frame, bg='white')
+        btn_frame.pack(fill=tk.X)
+
+        def apply():
+            new_editor = editor_var.get()
+            new_preview = preview_var.get()
+            if new_editor != self.editor_font_size or new_preview != self.preview_font_size:
+                self.editor_font_size = new_editor
+                self.preview_font_size = new_preview
+                self.save_font_settings()
+                # 更新编辑器字体
+                self.text_box.config(font=('Arial', self.scale_size(self.editor_font_size)))
+                # 强制重新渲染预览
+                self._last_rendered = None
+                if self.output:
+                    self.update_preview()
+            win.destroy()
+
+        tk.Button(btn_frame, text="应用", command=apply,
+                 bg='#e0e0e0', font=('Arial', 10)).pack(side='right', padx=(5, 0))
+        tk.Button(btn_frame, text="取消", command=win.destroy,
+                 bg='#e0e0e0', font=('Arial', 10)).pack(side='right')
+
     def load_scaled_image(self, image_path, custom_scale=None):
         """按DPI比例加载图像"""
         # 使用自定义缩放因子或系统DPI缩放
@@ -248,9 +376,20 @@ class MixTeXApp:
             model_paths = [
                 path,  # 原始路径（相对路径）
                 os.path.join(os.path.dirname(sys.executable), 'onnx'),  # exe同目录下的onnx文件夹
-                os.path.abspath("onnx")  # 当前运行目录下的onnx文件夹
+                os.path.abspath("onnx"),  # 当前运行目录下的onnx文件夹
             ]
+
+            # 向上搜索exe父目录中的onnx（适配dist/目录结构）
+            exe_dir = os.path.dirname(sys.executable)
+            for _ in range(4):
+                exe_dir = os.path.dirname(exe_dir)
+                model_paths.append(os.path.join(exe_dir, 'onnx'))
             
+            # 添加脚本所在目录及上级目录下的onnx路径
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            model_paths.append(os.path.join(script_dir, 'onnx'))
+            model_paths.append(os.path.join(os.path.dirname(script_dir), 'onnx'))
+
             # 寻找第一个有效的模型路径
             valid_path = None
             for model_path in model_paths:
@@ -280,8 +419,8 @@ class MixTeXApp:
                     
             tokenizer = RobertaTokenizer.from_pretrained(valid_path)
             feature_extractor = ViTImageProcessor.from_pretrained(valid_path)
-            encoder_session = ort.InferenceSession(f"{valid_path}/encoder_model.onnx")
-            decoder_session = ort.InferenceSession(f"{valid_path}/decoder_model_merged.onnx")
+            encoder_session = ort.InferenceSession(f"{valid_path}/encoder_model.onnx", providers=['CPUExecutionProvider'])
+            decoder_session = ort.InferenceSession(f"{valid_path}/decoder_model_merged.onnx", providers=['CPUExecutionProvider'])
             self.log('\n===成功加载模型===\n')
             return (tokenizer, feature_extractor, encoder_session, decoder_session)
         except Exception as e:
@@ -451,6 +590,9 @@ class MixTeXApp:
                         if self.use_dollars_for_inline_math:
                             result = result.replace('\\(', '$').replace('\\)', '$')
                         pyperclip.copy(result)
+                        self.root.after(0, self.update_preview)
+                        # OCR 完成后用干净结果替换文本框内容（方便编辑和重新渲染）
+                        self.root.after(0, lambda r=result: self._show_clean_result(r))
                 except Exception as e:
                     self.log(f"Error: {e}")
                 time.sleep(0.1)
@@ -468,6 +610,217 @@ class MixTeXApp:
         self.icon_tk = ImageTk.PhotoImage(self.icon)
         self.icon_label.config(image=self.icon_tk)
         self.tray_icon.icon = self.icon
+
+    def render_latex_to_image(self, latex_str):
+        """将LaTeX渲染为PIL图片"""
+        try:
+            if not latex_str or not latex_str.strip():
+                return None
+
+            tex = latex_str
+            # 清理环境命令
+            for env in ['align*', 'aligned', 'equation*', 'equation', 'gather*', 'gather']:
+                tex = tex.replace(f'\\begin{{{env}}}', '')
+                tex = tex.replace(f'\\end{{{env}}}', '')
+            tex = tex.replace('\\[', '').replace('\\]', '')
+            tex = tex.replace('&', ' ')
+            tex = tex.strip('\n ')
+
+            if not tex:
+                return None
+
+            lines = [l.strip() for l in tex.split('\\\\') if l.strip()]
+            if not lines:
+                return None
+
+            rendered_lines = []
+            for line in lines:
+                fig = plt.figure(figsize=(12, 1.2))
+                fig.patch.set_facecolor('white')
+                fig.text(0.5, 0.5, f'${line}$', fontsize=self.preview_font_size,
+                        ha='center', va='center')
+
+                fig.canvas.draw()
+                w, h = fig.canvas.get_width_height()
+                # matplotlib 3.9+ 使用 buffer_rgba 替代 tostring_rgb
+                buf = np.asarray(fig.canvas.buffer_rgba())
+                img = Image.fromarray(buf, 'RGBA').convert('RGB')
+                plt.close(fig)
+                rendered_lines.append(img)
+
+            if len(rendered_lines) == 1:
+                return rendered_lines[0]
+
+            total_h = sum(im.height for im in rendered_lines)
+            max_w = max(im.width for im in rendered_lines)
+            combined = Image.new('RGB', (max_w, total_h), (255, 255, 255))
+            y = 0
+            for im in rendered_lines:
+                combined.paste(im, ((max_w - im.width) // 2, y))
+                y += im.height
+            return combined
+
+        except Exception as e:
+            print(f"公式渲染失败: {e}")
+            return None
+
+    def update_preview(self):
+        """OCR 结果更新后渲染并显示预览"""
+        if not self.output or self.output == self._last_rendered:
+            return
+
+        rendered = self.render_latex_to_image(self.output)
+        if rendered:
+            self._full_preview_image = rendered
+            self._last_rendered = self.output
+            self._display_preview()
+        else:
+            self._full_preview_image = None
+            self._hide_preview()
+
+    def _display_preview(self):
+        """将缓存的预览图缩放到当前窗口宽度并显示"""
+        if not self._full_preview_image:
+            self._hide_preview()
+            return
+
+        # 确保布局已就绪，否则取一个合理的默认宽度
+        frame_w = self.text_frame.winfo_width()
+        if frame_w <= 1:
+            frame_w = self.root.winfo_width() or self.scale_size(500)
+        avail_width = max(self.scale_size(500), frame_w - self.scale_size(10))
+
+        img = self._full_preview_image
+        if img.width > avail_width:
+            ratio = avail_width / img.width
+            img = img.resize((avail_width, int(img.height * ratio)), Image.LANCZOS)
+
+        self._preview_photo = ImageTk.PhotoImage(img)
+        self.preview_label.config(image=self._preview_photo)
+        if not self.preview_frame.winfo_ismapped():
+            self._show_preview()
+        else:
+            # 窗口缩放时维持分割线比例，避免预览区"移动"
+            self.root.after_idle(self._set_preview_sash)
+
+    def _hide_preview(self):
+        """从 PanedWindow 中移除预览区域"""
+        try:
+            self.pane.forget(self.preview_frame)
+        except tk.TclError:
+            pass
+
+    def _show_preview(self):
+        """将预览区域添加到 PanedWindow 并设置分割线位置"""
+        self.pane.add(self.preview_frame, stretch='never')
+        self.pane.after_idle(self._set_preview_sash)
+
+    def _set_preview_sash(self):
+        """设置分割线位置：文本区约占65%"""
+        try:
+            h = self.pane.winfo_height()
+            if h > 0:
+                self.pane.sash_place(0, 0, int(h * 0.65))
+        except Exception:
+            pass
+
+    # ── 窗口边缘缩放 ──────────────────────────────────────────
+    RESIZE_MARGIN = 6
+    MIN_WINDOW_WIDTH = 400
+    MIN_WINDOW_HEIGHT = 300
+
+    def _get_resize_edges(self, event):
+        """判断鼠标是否在窗口边缘热区，返回 (cursor, edges_tuple)"""
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        x, y = event.x, event.y
+        left = x < self.RESIZE_MARGIN
+        right = x > w - self.RESIZE_MARGIN
+        top = y < self.RESIZE_MARGIN
+        bottom = y > h - self.RESIZE_MARGIN
+
+        if left and top:    return 'size_nw_se', ('nw',)
+        if left and bottom: return 'size_ne_sw', ('sw',)
+        if right and top:   return 'size_ne_sw', ('ne',)
+        if right and bottom:return 'size_nw_se', ('se',)
+        if left:            return 'size_we', ('w',)
+        if right:           return 'size_we', ('e',)
+        if top:             return 'size_ns', ('n',)
+        if bottom:          return 'size_ns', ('s',)
+        return None, None
+
+    def _on_mouse_move(self, event):
+        """鼠标移动时更新光标形状"""
+        cursor, _ = self._get_resize_edges(event)
+        self.root.config(cursor=cursor or '')
+
+    def _on_button_press(self, event):
+        """鼠标按下 — 仅处理边缘缩放，不接管拖拽"""
+        _, edges = self._get_resize_edges(event)
+        if edges:
+            self._resize_data = {
+                'edges': edges,
+                'sx': event.x_root, 'sy': event.y_root,
+                'wx': self.root.winfo_x(), 'wy': self.root.winfo_y(),
+                'ww': self.root.winfo_width(), 'wh': self.root.winfo_height(),
+            }
+
+    def _on_drag(self, event):
+        """鼠标拖拽 — 仅处理边缘缩放"""
+        if not self._resize_data:
+            return
+        d = self._resize_data
+        dx = event.x_root - d['sx']
+        dy = event.y_root - d['sy']
+
+        x, y = d['wx'], d['wy']
+        w, h = d['ww'], d['wh']
+
+        if 'e' in d['edges']: w = max(self.scale_size(self.MIN_WINDOW_WIDTH), d['ww'] + dx)
+        if 'w' in d['edges']:
+            w = max(self.scale_size(self.MIN_WINDOW_WIDTH), d['ww'] - dx)
+            x = d['wx'] + (d['ww'] - w)
+        if 's' in d['edges']: h = max(self.scale_size(self.MIN_WINDOW_HEIGHT), d['wh'] + dy)
+        if 'n' in d['edges']:
+            h = max(self.scale_size(self.MIN_WINDOW_HEIGHT), d['wh'] - dy)
+            y = d['wy'] + (d['wh'] - h)
+
+        self.root.geometry(f'{w}x{h}+{x}+{y}')
+
+    def _on_release(self, event):
+        """鼠标释放 — 结束缩放"""
+        self._resize_data = None
+
+    # ── 窗口缩放时更新预览 ──────────────────────────────────────
+    def _on_window_configure(self, event):
+        if event.widget == self.root and self._full_preview_image:
+            # 只在尺寸真正变化时才重新缩放预览，避免拖拽移动窗口时重复触发
+            cur = (event.width, event.height)
+            if not hasattr(self, '_last_win_size') or self._last_win_size != cur:
+                self._last_win_size = cur
+                self.root.after_idle(self._display_preview)
+
+    # ── OCR 完成后只保留干净 LaTeX ─────────────────────────────
+    def _show_clean_result(self, latex):
+        """清空文本框，只显示可编辑的干净 LaTeX"""
+        self.text_box.delete(1.0, tk.END)
+        self.text_box.insert(tk.END, latex)
+
+    # ── 编辑 LaTeX 后重新渲染预览 ──────────────────────────────
+    def _on_text_edit(self, event=None):
+        """用户编辑文本框后防抖重新渲染预览"""
+        if self._edit_timer:
+            self.root.after_cancel(self._edit_timer)
+        self._edit_timer = self.root.after(500, self._do_render_from_text)
+
+    def _do_render_from_text(self):
+        """读取文本框内容并更新预览"""
+        self._edit_timer = None
+        new_text = self.text_box.get(1.0, tk.END).strip()
+        if new_text and new_text != self._last_rendered:
+            self.output = new_text
+            self._last_rendered = None  # 强制重新渲染
+            self.update_preview()
 
     def log(self, message, end='\n'):
         self.text_box.insert(tk.END, message + end)
