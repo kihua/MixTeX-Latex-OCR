@@ -110,7 +110,7 @@ MixTeX uses LaTeX for code rendering. Recommended LaTeX preamble:
 
 ## Changelog
 
-- **v3.2.4+**: Added real-time formula preview (Computer Modern font), resizable borderless window with edge-drag, adjustable font sizes, draggable preview/text splitter, editable LaTeX with auto-re-render. Fine-tuned on 500 real samples. Supports multiple-choice question OCR. `F2` toggles recognition.
+- **v3.2.4+**: Added real-time formula preview (Computer Modern font), resizable borderless window with edge-drag, adjustable font sizes, draggable preview/text splitter, editable LaTeX with auto-re-render. 
 
 - **v3.2.4**: Fine-tuned 500 real samples. Supports multiple-choice question OCR. Press `F2` after clicking the app icon to toggle recognition. Improved escaping of multi-line and inline formulas into `$$` wrappers.
 
@@ -239,7 +239,7 @@ MixTeX 在识别复杂文本方面表现出色，中英文识别效果俱佳。
 
 ## 更新日志
 
-- **v3.2.4+**：新增实时公式预览（Computer Modern 字体）、自由缩放窗口（边缘拖拽）、字体大小设置、可拖拽编辑/预览分割线、可编辑 LaTeX 自动重渲染。微调 500 张真实样本。支持选择题 OCR。`F2` 开关识别。
+- **v3.2.4+**：新增实时公式预览（Computer Modern 字体）、自由缩放窗口（边缘拖拽）、字体大小设置、可拖拽编辑/预览分割线、可编辑 LaTeX 自动重渲染。
 
 - **v3.2.4**：微调 500 张真实样本，支持选择题 OCR，支持 F2 暂停/恢复识别，改进了多行公式和行内公式的 `$$` 转义。
 

@@ -68,6 +68,11 @@ class MixTeXApp:
         self.icon_label = tk.Label(self.main_frame, image=self.icon_tk, bg=self.TRANSCOLOUR)
         self.icon_label.pack(pady=self.scale_size(5))
 
+        # OCR 状态指示
+        self.status_label = tk.Label(self.main_frame, text="", bg=self.TRANSCOLOUR,
+                                     fg='#666666', font=('Arial', self.scale_size(9)))
+        self.status_label.pack()
+
         # 使用 PanedWindow 实现可拖拽分隔的文本区和预览区
         self.pane = tk.PanedWindow(self.main_frame, orient=tk.VERTICAL, bg='white',
                                    sashwidth=4, sashrelief=tk.RAISED)
@@ -91,6 +96,7 @@ class MixTeXApp:
         self.icon_label.bind('<ButtonPress-1>', self.start_move)
         self.icon_label.bind('<B1-Motion>', self.do_move)
         self.icon_label.bind('<ButtonPress-3>', self.show_menu)
+        self.icon_label.bind('<Double-Button-1>', self.toggle_ocr)
 
         # 编辑 LaTeX 后重新渲染预览（带防抖）
         self._edit_timer = None
@@ -102,6 +108,9 @@ class MixTeXApp:
         self.root.bind('<B1-Motion>', self._on_drag, add='+')
         self.root.bind('<ButtonRelease-1>', self._on_release, add='+')
         self.root.bind('<Configure>', self._on_window_configure, add='+')
+        # F2 切换 OCR 暂停/恢复
+        self.root.bind_all('<F2>', self.toggle_ocr)
+        self.root.bind('<Button-1>', self._on_click_focus, add='+')
         self.data_folder = "data"
         self.metadata_file = os.path.join(self.data_folder, "metadata.csv")
         self.use_dollars_for_inline_math = False
@@ -148,6 +157,9 @@ class MixTeXApp:
         else:
             self.ocr_thread = threading.Thread(target=self.ocr_loop, daemon=True)
             self.ocr_thread.start()
+
+        # 初始化状态指示
+        self.root.after(100, self.update_icon)
 
         self.donate_window = None
 
@@ -597,15 +609,22 @@ class MixTeXApp:
                     self.log(f"Error: {e}")
                 time.sleep(0.1)
 
+    def _on_click_focus(self, event):
+        """点击窗口时获取键盘焦点"""
+        self.root.focus_set()
+
     def toggle_ocr(self, event=None):
         self.ocr_paused = not self.ocr_paused
         self.root.after(0, self.update_icon)
+        print(f"OCR {'paused' if self.ocr_paused else 'resumed'} (F2)")
 
     def update_icon(self):
         if self.ocr_paused:
             new_icon = self.load_scaled_image(os.path.join(base_path, "icon_gray.png"))
+            self.status_label.config(text="● OCR 已暂停（双击图标恢复）", fg='#cc0000')
         else:
             new_icon = self.load_scaled_image(os.path.join(base_path, "icon.png"))
+            self.status_label.config(text="● OCR 运行中（双击图标暂停）", fg='#009900')
         self.icon = new_icon
         self.icon_tk = ImageTk.PhotoImage(self.icon)
         self.icon_label.config(image=self.icon_tk)
