@@ -110,7 +110,7 @@ MixTeX uses LaTeX for code rendering. Recommended LaTeX preamble:
 
 ## Changelog
 
-- **v3.2.4+**: Added real-time formula preview (Computer Modern font), resizable borderless window with edge-drag, adjustable font sizes, draggable preview/text splitter, editable LaTeX with auto-re-render. Fine-tuned on 500 real samples. Supports multiple-choice question OCR. `F2` toggles recognition.
+- **v3.2.4+**: Added real-time formula preview (Computer Modern font), resizable borderless window with edge-drag, adjustable font sizes, draggable preview/text splitter, editable LaTeX with auto-re-render.`F2` toggles recognition.
 
 - **v3.2.4**: Fine-tuned 500 real samples. Supports multiple-choice question OCR. Press `F2` after clicking the app icon to toggle recognition. Improved escaping of multi-line and inline formulas into `$$` wrappers.
 
